@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <title>Notify HN</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="manifest" href="manifest.json">
+  <link rel="stylesheet" type="text/css" href="base.css">
+  <script src="/idb.js"></script>
+  <script src="/app.js" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/vue@2.5.17/dist/vue.js"></script>
+</head>
+
+<body>
+  <div id="app" class="container">
+    <noscript>
+      <h2>This site is a Progressive Web App, so it won't work without JS by definition.</h2>
+    </noscript>
+    <form v-on:submit.prevent>
+      <div class="flex-center">
+        <input class="flex-fill mr-small" type="text" placeholder="url, name" v-model="addItemQuery" />
+        <button type="submit" @click="addItem">add</button>
+      </div>
+    </form>
+
+    <p class="error">{{ errorMsg }}</p>
+    <div id="control-panel" class="flex-center flex-end mt-medium">
+      <button @click="toggleShowAction">{{ showActionText }}</button>
+      <select class="ml-small">
+        <option value="recent">recent</option>
+        <option value="a-z">a-z</option>
+        <option value="z-a">z-a</option>
+      </select>
+    </div>
+    <h4>Stories</h4>
+    <ul>
+      <li v-for="story in stories">
+        <p>
+          <a :href=`https://news.ycombinator.com/item?id=${story.id}`>{{ story.title }} </a>
+        </p>
+        <p class="action" v-show="showActions" @click="removeFromArray('stories', story)">remove</p>
+      </li>
+    </ul>
+    <h4>Comments</h4>
+    <ul>
+      <li v-for="comment in comments">
+        <p>
+          <a :href=`https://news.ycombinator.com/item?id=${comment.id}` v-html="comment.text" class="comment"></a>
+        </p>
+        <p class="action" v-show="showActions" @click="removeFromArray('comments', comment)">remove</p>
+      </li>
+    </ul>
+    <h4>Profiles</h4>
+    <ul>
+      <li v-for="user in users">
+        <p>
+          <a :href=`https://news.ycombinator.com/user?id=${user.id}`>{{ user.id }}</a>
+        </p>
+        <p class="action" v-show="showActions" @click="removeFromArray('users', user)">remove</p>
+      </li>
+    </ul>
+  </div>
+</body>
+<script>
+  var vm = new Vue({
+    el: "#app",
+    data: {
+      showActions: false,
+      addItemQuery: '',
+      errorMsg: '',
+      arrays: {},
+      db: {},
+      comments: [],
+      stories: [],
+      users: []
+    },
+    computed: {
+      showActionText() {
+        return this.showActions ? "hide actions" : "show actions"
+      }
+    },
+    methods: {
+      getQueryStringParams(query) {
+        return query
+          ? (/^[?#]/.test(query) ? query.slice(1) : query)
+            .split('&')
+            .reduce((params, param) => {
+              let [key, value] = param.split('=');
+              params[key] = value ? decodeURIComponent(value.replace(/\+/g, ' ')) : '';
+              return params;
+            }, {}
+            )
+          : {}
+      },
+      addItem() {
+        this.errorMsg = ''
+        const query = this.addItemQuery.toLowerCase();
+        this.addItemQuery = ''
+        // Not a URL, so assume it's a profile
+        if (!query.includes('news.ycombinator.com')) {
+          return this.addProfile(query);
+        }
+
+        // Form URL from provided query
+        const expandedQuery = query.startsWith('http') ? query : 'https://' + query;
+        let url;
+        try {
+          url = new URL(expandedQuery);
+        } catch (err) {
+          this.errorMsg = "Error while trying to construct HN url from query." + JSON.stringify(err);
+          return;
+        }
+        // Clear error messages so duplicates are obvious to the user
+        // Extract id from url
+        const id = url.searchParams.get('id');
+        // Path should either be item or user
+        switch (url.pathname.substr(1)) {
+          case 'user':
+            this.addProfile(id);
+            break;
+          case 'item':
+            this.addStoryComment(id)
+            break;
+        }
+      },
+      fetchItem(query) {
+        return fetch(`https://hacker-news.firebaseio.com/v0/item/${query}.json`)
+      },
+      fetchProfile(query) {
+        return fetch(`https://hacker-news.firebaseio.com/v0/user/${query}.json`)
+      },
+      addStoryComment(id) {
+        this.fetchItem(id)
+          .then(response => response.json())
+          .then(item => {
+            if (!item) return this.errorMsg = "Could not retrieve this item";
+            if (item.type === 'story') return this.addToArray('stories', item);
+            const domParser = new DOMParser();
+            const htmlDoc = domParser.parseFromString(item.text, 'text/html');
+            this.addToArray('comments', item)
+          })
+          .catch(err => {
+            this.errorMsg = "Unable to fetch story or comment: " + err;
+            console.error(err)
+          });
+      },
+      addProfile(query) {
+        this.fetchProfile(query)
+          .then(response => response.json())
+          .then(user => {
+            if (!user) return this.errorMsg = "Could not find this user";
+            this.addToArray('users', user);
+          })
+          .catch(err => {
+            this.errorMsg = "Unable to add profile." + err
+            console.error(err)
+          });
+      },
+      addToArray(arrayName, item) {
+        const array = this.arrays[arrayName];
+        array.push(item);
+        this.db.then(db => {
+          const tx = db.transaction(arrayName, 'readwrite');
+          tx.objectStore(arrayName).put({
+            id: item.id,
+            data: item
+          });
+          return tx.complete;
+        }).catch(err => {
+          this.errorMsg = "Error adding item: " + err;
+          console.error(err);
+        });
+      },
+      removeFromArray(arrayName, item) {
+        const array = this.arrays[arrayName];
+        const index = array.indexOf(item);
+        array.splice(index, 1);
+        this.db.then(db => {
+          const tx = db.transaction(arrayName, 'readwrite');
+          tx.objectStore(arrayName).delete(item.id);
+          return tx.complete;
+        }).catch(err => {
+          this.errorMsg = "Error removing item: " + err;
+          console.error(err);
+        });
+      },
+      toggleShowAction() {
+        this.showActions = !this.showActions;
+        this.db.then(db => {
+          console.log(this.showActions);
+          const tx = db.transaction('settings', 'readwrite');
+          tx.objectStore('settings').put({
+            setting: 'showActions',
+            data: this.showActions
+          });
+          return tx.complete;
+        }).catch(err => {
+          console.error(err);
+        });
+      },
+    },
+    created() {
+      // Create/Retrieve IndexedDB store
+      this.db = idb.open('keyval-store', 1, upgradeDB => {
+        upgradeDB.createObjectStore('comments', { keyPath: 'id' });
+        upgradeDB.createObjectStore('stories', { keyPath: 'id' });
+        upgradeDB.createObjectStore('users', { keyPath: 'id' });
+        upgradeDB.createObjectStore('settings', { keyPath: 'setting' });
+      });
+
+      // Mount existing Stories, Comments, and User profiles
+      this.db.then(db => {
+        return db.transaction('users').objectStore('users').getAll();
+      }).then(rows => rows.map(row => row.data))
+        .then(users => this.users.push(...users))
+      this.db.then(db => {
+        return db.transaction('stories').objectStore('stories').getAll();
+      }).then(rows => rows.map(row => row.data))
+        .then(stories => this.stories.push(...stories));
+      this.db.then(db => {
+        return db.transaction('comments').objectStore('comments').getAll();
+      }).then(rows => rows.map(row => row.data))
+        .then(comments => this.comments.push(...comments));
+
+      // Setup array dict
+      this.arrays.users = this.users;
+      this.arrays.stories = this.stories;
+      this.arrays.comments = this.comments;
+
+      // Mount settings
+      this.db.then(db => {
+        return db.transaction('settings').objectStore('settings').get('showActions');
+      }).then(value => this.showActions = value ? value.data : false);
+    },
+  })
+</script>
+
+</html>
