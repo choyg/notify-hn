@@ -189,7 +189,6 @@
       toggleShowAction() {
         this.showActions = !this.showActions;
         this.db.then(db => {
-          console.log(this.showActions);
           const tx = db.transaction('settings', 'readwrite');
           tx.objectStore('settings').put({
             setting: 'showActions',
